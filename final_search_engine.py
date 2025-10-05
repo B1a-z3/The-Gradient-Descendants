@@ -3,14 +3,31 @@
 Final Working Mouser Search Engine - Interactive Version
 """
 
+# import os
+# import json
+# import requests
+# import google.generativeai as genai
+
 import os
 import json
 import requests
+import logging # <-- Import the required libraries
 import google.generativeai as genai
+# from google.colab import userdata
+
+# ==============================================================================
+# 3. CONFIGURE LOGGING & ENVIRONMENT (THE CORRECT PLACE)
+# ==============================================================================
+# This is the perfect spot for the logging/warning suppression block.
+logging.getLogger('absl').setLevel(logging.ERROR)
+os.environ['GRPC_VERBOSITY'] = 'NONE'
+
+# Suppress gRPC warnings from the google-generativeai library
+#os.environ['GRPC_VERBOSITY'] = 'ERROR'
 
 # Load API keys
 MOUSER_API_KEY = "d99c4255-03a1-495a-8a37-c317fa862ab2"
-GEMINI_API_KEY = "AIzaSyDcGNx1RsNgWOC9K-7bH40fdnRqm4vqtTs"
+GEMINI_API_KEY = "AIzaSyCxbtXhRCZCf5UN_meDkWauKiXomz4cqMo"
 
 # Mouser API endpoint
 MOUSER_API_URL = "https://api.mouser.com/api/v1.0/search/partnumber"
@@ -73,30 +90,59 @@ def get_search_terms_from_query(natural_language_query: str) -> str:
 
     try:
         genai.configure(api_key=GEMINI_API_KEY)
-        
-        # Try different model names
-        model_names = ["gemini-1.5-flash", "gemini-1.0-pro", "gemini-pro"]
-        
-        for model_name in model_names:
-            try:
-                model = genai.GenerativeModel(model_name=model_name)
-                prompt = f"""
-                You are an expert electronics engineer assistant. Your task is to translate a user's natural language request for an electronic component into a precise search keyword for the Mouser Electronics API. Return ONLY the most likely search keyword (like a part number, component type, or key spec) and nothing else.
+        model = genai.GenerativeModel(model_name="gemini-1.5-flash")
+        prompt = f"""
+        You are an expert electronics engineer assistant. Your task is to translate a user's natural language request for an electronic component into a precise search keyword for the Mouser Electronics API. Return ONLY the most likely search keyword (like a part number, component type, or key spec) and nothing else.
 
-                User Request: "{natural_language_query}"
-                
-                Search Keyword:
-                """
-                response = model.generate_content(prompt)
-                return response.text.strip()
-            except Exception as e:
-                continue
+        User Request: "{natural_language_query}"
         
-        # If all models fail, use fallback
-        return simple_search_enhancement(natural_language_query)
+        Search Keyword:
+        """
+        response = model.generate_content(prompt)
+        return response.text.strip()
         
     except Exception as e:
+        # Print the actual error from the API to help with debugging
+        print(f"Error communicating with Gemini API: {e}")
+        print("Falling back to simple search enhancement.")
         return simple_search_enhancement(natural_language_query)
+
+def get_project_components_from_query(natural_language_query: str) -> list:
+    """Uses Gemini to break down a project idea into a list of component types."""
+    if not GEMINI_API_KEY:
+        print("Gemini API key not configured.")
+        return []
+
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        model = genai.GenerativeModel(model_name="gemini-1.5-flash")
+        
+        prompt = f"""
+        You are an expert electronics system designer. A user wants to build a project. 
+        Your task is to list the essential electronic component types they would need.
+
+        Analyze the user's request and provide a list of generic but specific component types that could be used as search terms for an electronics distributor like Mouser.
+
+        Return your answer as a JSON array of strings ONLY. Do not include any other text or explanations.
+
+        For example, if the user says "I want to make a smart watch", a good response would be:
+        ["microcontroller with bluetooth", "small OLED display", "accelerometer and gyroscope sensor", "lithium battery charger IC", "vibration motor", "3.7V LiPo battery"]
+
+        User Request: "{natural_language_query}"
+
+        JSON Array:
+        """
+        response = model.generate_content(prompt)
+        
+        # Clean up the response to ensure it's valid JSON
+        cleaned_text = response.text.strip().replace("```json", "").replace("```", "")
+        
+        component_list = json.loads(cleaned_text)
+        return component_list
+
+    except Exception as e:
+        print(f"Error communicating with Gemini or parsing response: {e}")
+        return []
 
 def simple_search_enhancement(query: str) -> str:
     """Simple search term enhancement without AI"""
@@ -123,52 +169,73 @@ def simple_search_enhancement(query: str) -> str:
     
     return query
 
+def display_search_results(results: dict, limit: int = 5):
+    """Displays formatted search results from the Mouser API response."""
+    if "error" in results:
+        print(f"API Error: {results['error']}")
+    elif results.get("Errors") and len(results["Errors"]) > 0:
+        print(f"Mouser API returned an error: {results['Errors'][0]['Message']}")
+    elif results.get("SearchResults") is None or results["SearchResults"]["NumberOfResult"] == 0:
+        print("No parts found for this search term.")
+    else:
+        num_results = results['SearchResults']['NumberOfResult']
+        parts = results['SearchResults']['Parts']
+        print(f"[SUCCESS] Found {num_results} parts!")
+        
+        print(f"\n--- Top {min(limit, len(parts))} Results ---")
+        for i, part in enumerate(parts[:limit], 1):
+            print(f"{i}. Mouser Part #: {part.get('MouserPartNumber', 'N/A')}")
+            print(f"   Manufacturer: {part.get('Manufacturer', 'N/A')}")
+            print(f"   Description: {part.get('Description', 'N/A')}")
+            print()
+
 def run_search_engine():
     """Main function to run the context-aware search engine."""
     print("Welcome to the Smart Electronics Search Engine!")
     print("Type 'exit' to quit.")
     print("Type 'demo' to see example searches.")
+    print("To break down a project, type 'project: [your project idea]' (e.g., 'project: a smart watch').")
 
     while True:
         try:
-            user_query = input("\nDescribe the part you are looking for: ")
+            user_query = input("\nDescribe the part or project you are looking for: ")
             
             if user_query.lower() == 'exit':
                 break
             elif user_query.lower() == 'demo':
                 show_demo()
                 continue
-
-            print("\nAsking AI assistant to find the best search term...")
-            search_keyword = get_search_terms_from_query(user_query)
-            
-            if "Error" in search_keyword:
-                print(f"Error from AI model: {search_keyword}")
-                continue
+            elif user_query.lower().startswith('project:'):
+                project_description = user_query[len('project:'):].strip()
+                print(f"\nUnderstood. Decomposing project '{project_description}' into required components...")
                 
-            print(f"[OK] AI suggested search term: '{search_keyword}'")
-
-            print(f"\nSearching Mouser for '{search_keyword}'...")
-            results = search_mouser_parts(search_keyword)
-
-            if "error" in results:
-                print(f"API Error: {results['error']}")
-            elif results.get("Errors") and len(results["Errors"]) > 0:
-                 print(f"Mouser API returned an error: {results['Errors'][0]['Message']}")
-            elif results.get("SearchResults") is None or results["SearchResults"]["NumberOfResult"] == 0:
-                print("No parts found for this search term.")
+                component_list = get_project_components_from_query(project_description)
+                
+                if not component_list:
+                    print("Could not determine components for the project.")
+                    continue
+                    
+                print(f"\n[OK] AI suggests you will need these {len(component_list)} component types. Searching for each...")
+                
+                for component_type in component_list:
+                    print(f"\n--- Searching for: {component_type} ---")
+                    results = search_mouser_parts(component_type, limit=3)
+                    display_search_results(results, limit=3)
+                print("\n------------------\n")
             else:
-                num_results = results['SearchResults']['NumberOfResult']
-                parts = results['SearchResults']['Parts']
-                print(f"[SUCCESS] Found {num_results} parts!")
+                # This is the existing logic for single-part search
+                print("\nAsking AI assistant to find the best search term...")
+                search_keyword = get_search_terms_from_query(user_query)
                 
-                # Show top 5 results instead of just 1
-                print(f"\n--- Top {min(5, len(parts))} Results ---")
-                for i, part in enumerate(parts[:5], 1):
-                    print(f"{i}. Mouser Part #: {part.get('MouserPartNumber', 'N/A')}")
-                    print(f"   Manufacturer: {part.get('Manufacturer', 'N/A')}")
-                    print(f"   Description: {part.get('Description', 'N/A')}")
-                    print()
+                if "Error" in search_keyword:
+                    print(f"Error from AI model: {search_keyword}")
+                    continue
+                    
+                print(f"[OK] AI suggested search term: '{search_keyword}'")
+
+                print(f"\nSearching Mouser for '{search_keyword}'...")
+                results = search_mouser_parts(search_keyword)
+                display_search_results(results)
                 print("------------------\n")
                 
         except KeyboardInterrupt:
